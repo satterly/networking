@@ -1,5 +1,5 @@
 /*
- * tcp-client.c
+ * tcpclient-nonblock.c
  */
 
 #include <stdio.h>
@@ -8,6 +8,9 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+
+#include <fcntl.h>
+#include <errno.h>
 
 // socket()
 //     set non-blocking
@@ -48,12 +51,63 @@ main() {
     perror("inet_pton failed");
   }
 
-  if (connect(sockfd, (struct sockaddr *) &remote_addr, sizeof(remote_addr)) < 0) {
-    perror("Connect failed");
-    exit(1);
-  } else {
-    printf("Connected to %s:%d\n", remote_host, remote_port);
+  // set to non-blocking
+  long flags = fcntl(sockfd, F_GETFL, 0);
+  fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
+
+  int n;
+  if ((n = connect(sockfd, (struct sockaddr *) &remote_addr, sizeof(remote_addr))) < 0) {
+    if (errno != EINPROGRESS) {
+      perror("Connect failed");
+      exit(1);
+    } else {
+      printf("Connect to %s:%d in progress...\n", remote_host, remote_port);
+    }
   }
+
+  int error = 0;
+  if (n == 0) {
+    printf("Connected to %s:%d\n", remote_host, remote_port);
+  } else {
+
+    fd_set rset, wset;
+    struct timeval tval;
+    
+    FD_ZERO(&rset);
+    FD_SET(sockfd, &rset);
+    wset = rset;
+    tval.tv_sec = 5; /* seconds */
+    tval.tv_usec = 0;
+
+    if ((n = select(sockfd+1, &rset, &wset, NULL, &tval)) == 0) {
+        errno = ETIMEDOUT; /* if returning */
+        perror("select()");
+        close(sockfd);
+        exit(1); 
+    }
+
+    if (FD_ISSET(sockfd, &rset) || FD_ISSET(sockfd, &wset)) {
+      int len = sizeof(error);
+      if (getsockopt(sockfd, SOL_SOCKET, SO_ERROR, &error, &len) < 0) {
+        perror("getsockopt()");
+        close(sockfd);
+        exit(1);
+      }
+    } else {
+        fprintf(stderr, "socket not set");
+        close(sockfd);
+        exit(1);
+    }
+  }
+
+  if (error) {
+    errno = error;
+    perror("connect()");
+    close(sockfd);
+    exit(1);
+  }
+
+  fcntl(sockfd, F_SETFL, flags);
 
   char *buf = "this is a message\n\n";
   int bytes = 0;
